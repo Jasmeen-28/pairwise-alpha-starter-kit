@@ -1,120 +1,88 @@
 """
-This is a sample strategy that demonstrates how to implement a basic trading strategy
-that passes all validation requirements. This strategy is for educational purposes only
-and does not guarantee profitable trades. Users are encouraged to create their own
-strategies based on their trading knowledge and risk management principles.
+Lunor Quest: PairWise Alpha Round 2 Strategy
+
 """
 
 import pandas as pd
 import numpy as np
 
-
-
-
 def get_coin_metadata() -> dict:
-    """
-    Specifies the target and anchor coins used in this strategy.
-    
-    Returns:
-    {
-        "targets": [{"symbol": "LDO", "timeframe": "1H"}],
-        "anchors": [
-            {"symbol": "BTC", "timeframe": "4H"},
-            {"symbol": "ETH", "timeframe": "4H"}
-        ]
-    }
-    """
     return {
-        "targets": [{
-            "symbol": "LDO",
-            "timeframe": "1H"
-        }],
+        "targets": [
+            {"symbol": "BONK", "timeframe": "1H"}
+        ],
         "anchors": [
-            {"symbol": "BTC", "timeframe": "4H"},
-            {"symbol": "ETH", "timeframe": "4H"}
+            {"symbol": "BTC", "timeframe": "1H"},
+            {"symbol": "ETH", "timeframe": "1H"},
+            {"symbol": "SOL", "timeframe": "1H"}
         ]
     }
+
+def compute_rsi(series, window=14):
+    delta = series.diff()
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=window).mean()
+    avg_loss = pd.Series(loss).rolling(window=window).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
 
 def generate_signals(anchor_df: pd.DataFrame, target_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Strategy: Buy LDO if BTC or ETH pumped >2% in the last 4H candle.
-    Enhanced with sell conditions and position sizing for complete trading pairs.
-
-    Inputs:
-    - anchor_df: DataFrame with timestamp, close_BTC_4H, close_ETH_4H columns
-    - target_df: DataFrame with timestamp, close_LDO_1H columns
-
-    Output:
-    - DataFrame with ['timestamp', 'symbol', 'signal', 'position_size']
-    """
     try:
-        # Merge anchor and target data on timestamp
-        df = pd.merge(
-            target_df[['timestamp', 'close_LDO_1H']],
-            anchor_df[['timestamp', 'close_BTC_4H', 'close_ETH_4H']],
-            on='timestamp',
-            how='outer'  # Use outer join to get all timestamps
-        ).sort_values('timestamp').reset_index(drop=True)
-        
-        # Calculate 4H returns for BTC and ETH
-        df['btc_return_4h'] = df['close_BTC_4H'].pct_change(fill_method=None)
-        df['eth_return_4h'] = df['close_ETH_4H'].pct_change(fill_method=None)
-        
-        # Calculate LDO price change for sell signals
-        df['ldo_return_1h'] = df['close_LDO_1H'].pct_change(fill_method=None)
-        
-        # Initialize signal arrays
+        df = pd.merge(target_df, anchor_df, on="timestamp", how="outer").sort_values("timestamp").reset_index(drop=True)
+
+        # Lagged returns for anchor coins
+        df["btc_ret_lag1"] = df["close_BTC_1H"].pct_change().shift(1)
+        df["eth_ret_lag2"] = df["close_ETH_1H"].pct_change().shift(2)
+        df["sol_ret_lag3"] = df["close_SOL_1H"].pct_change().shift(3)
+
+        # RSI of BONK for entry filtering
+        df["rsi_bonk"] = compute_rsi(df["close_BONK_1H"])
+
+        # Entry and exit management
         signals = []
-        position_sizes = []
-        
-        # Track position state for generating buy-sell pairs
+        sizes = []
         in_position = False
-        entry_price = 0
-        
+        entry_price = 0.0
+
         for i in range(len(df)):
-            # Get current values (handle NaN)
-            btc_pump = df['btc_return_4h'].iloc[i] > 0.02 if pd.notna(df['btc_return_4h'].iloc[i]) else False
-            eth_pump = df['eth_return_4h'].iloc[i] > 0.02 if pd.notna(df['eth_return_4h'].iloc[i]) else False
-            ldo_price = df['close_LDO_1H'].iloc[i]
-            
-            # Signal generation logic
+            btc_signal = df["btc_ret_lag1"].iloc[i] > 0.015 if pd.notna(df["btc_ret_lag1"].iloc[i]) else False
+            eth_signal = df["eth_ret_lag2"].iloc[i] > 0.015 if pd.notna(df["eth_ret_lag2"].iloc[i]) else False
+            sol_signal = df["sol_ret_lag3"].iloc[i] > 0.015 if pd.notna(df["sol_ret_lag3"].iloc[i]) else False
+            rsi = df["rsi_bonk"].iloc[i]
+            price = df["close_BONK_1H"].iloc[i]
+
             if not in_position:
-                # Look for buy signals
-                if (btc_pump or eth_pump) and pd.notna(ldo_price):
-                    signals.append('BUY')
-                    position_sizes.append(0.5)  # 50% position size
+                if (btc_signal or eth_signal or sol_signal) and pd.notna(price) and pd.notna(rsi) and rsi < 40:
+                    signals.append("BUY")
+                    sizes.append(0.7)
                     in_position = True
-                    entry_price = ldo_price
+                    entry_price = price
                 else:
-                    signals.append('HOLD')
-                    position_sizes.append(0.0)
+                    signals.append("HOLD")
+                    sizes.append(0.0)
             else:
-                # Look for sell signals when in position
-                if pd.notna(ldo_price) and entry_price > 0:
-                    # Sell conditions: 5% profit or 3% loss
-                    profit_pct = (ldo_price - entry_price) / entry_price
-                    
-                    if profit_pct >= 0.05 or profit_pct <= -0.03:
-                        signals.append('SELL')
-                        position_sizes.append(0.0)
+                if pd.notna(price) and entry_price > 0:
+                    pnl = (price - entry_price) / entry_price
+                    if pnl >= 0.06 or pnl <= -0.03:
+                        signals.append("SELL")
+                        sizes.append(0.0)
                         in_position = False
-                        entry_price = 0
+                        entry_price = 0.0
                     else:
-                        signals.append('HOLD')
-                        position_sizes.append(0.5)  # Maintain position
+                        signals.append("HOLD")
+                        sizes.append(0.7)
                 else:
-                    signals.append('HOLD')
-                    position_sizes.append(0.5 if in_position else 0.0)
-        
-        # Create result DataFrame with required columns
-        result_df = pd.DataFrame({
-            'timestamp': df['timestamp'],
-            'symbol': 'LDO',  # All signals are for LDO (the target)
-            'signal': signals,
-            'position_size': position_sizes
+                    signals.append("HOLD")
+                    sizes.append(0.7)
+
+        return pd.DataFrame({
+            "timestamp": df["timestamp"],
+            "symbol": "BONK",
+            "signal": signals,
+            "position_size": sizes
         })
-        
-        return result_df
-        
+
     except Exception as e:
-        raise RuntimeError(f"Error in generate_signals: {e}")
+        raise RuntimeError(f"[Strategy Error] {e}")
