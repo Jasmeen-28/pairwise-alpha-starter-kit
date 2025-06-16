@@ -37,43 +37,53 @@ def generate_signals(anchor_df: pd.DataFrame, target_df: pd.DataFrame) -> pd.Dat
         df["eth_ret_lag2"] = df["close_ETH_1H"].pct_change().shift(2)
         df["sol_ret_lag3"] = df["close_SOL_1H"].pct_change().shift(3)
 
-        # RSI of BONK for entry filtering
+        # RSI and volatility for BONK
         df["rsi_bonk"] = compute_rsi(df["close_BONK_1H"])
+        df["volatility"] = df["close_BONK_1H"].rolling(window=10).std()
 
-        # Entry and exit management
+        # Initialize signal logic
         signals = []
         sizes = []
         in_position = False
         entry_price = 0.0
+        trailing_stop = 0.0
 
         for i in range(len(df)):
-            btc_signal = df["btc_ret_lag1"].iloc[i] > 0.015 if pd.notna(df["btc_ret_lag1"].iloc[i]) else False
-            eth_signal = df["eth_ret_lag2"].iloc[i] > 0.015 if pd.notna(df["eth_ret_lag2"].iloc[i]) else False
-            sol_signal = df["sol_ret_lag3"].iloc[i] > 0.015 if pd.notna(df["sol_ret_lag3"].iloc[i]) else False
-            rsi = df["rsi_bonk"].iloc[i]
             price = df["close_BONK_1H"].iloc[i]
+            rsi = df["rsi_bonk"].iloc[i]
+            vol = df["volatility"].iloc[i]
+
+            # Signal weights
+            score = 0
+            if pd.notna(df["btc_ret_lag1"].iloc[i]) and df["btc_ret_lag1"].iloc[i] > 0.01:
+                score += 1
+            if pd.notna(df["eth_ret_lag2"].iloc[i]) and df["eth_ret_lag2"].iloc[i] > 0.01:
+                score += 1
+            if pd.notna(df["sol_ret_lag3"].iloc[i]) and df["sol_ret_lag3"].iloc[i] > 0.01:
+                score += 1
 
             if not in_position:
-                if (btc_signal or eth_signal or sol_signal) and pd.notna(price) and pd.notna(rsi) and rsi < 40:
+                if score >= 2 and pd.notna(price) and pd.notna(rsi) and rsi < 40 and (pd.isna(vol) or vol < 0.02):
                     signals.append("BUY")
                     sizes.append(0.7)
                     in_position = True
                     entry_price = price
+                    trailing_stop = price * 0.97  # 3% trailing stop
                 else:
                     signals.append("HOLD")
                     sizes.append(0.0)
             else:
-                if pd.notna(price) and entry_price > 0:
-                    pnl = (price - entry_price) / entry_price
-                    if pnl >= 0.06 or pnl <= -0.03:
-                        signals.append("SELL")
-                        sizes.append(0.0)
-                        in_position = False
-                        entry_price = 0.0
-                    else:
-                        signals.append("HOLD")
-                        sizes.append(0.7)
+                pnl = (price - entry_price) / entry_price if pd.notna(price) and entry_price > 0 else 0
+                if price <= trailing_stop or pnl >= 0.06 or pnl <= -0.03 or (pd.notna(rsi) and rsi > 70):
+                    signals.append("SELL")
+                    sizes.append(0.0)
+                    in_position = False
+                    entry_price = 0.0
+                    trailing_stop = 0.0
                 else:
+                    # Update trailing stop
+                    if price > entry_price and price * 0.97 > trailing_stop:
+                        trailing_stop = price * 0.97
                     signals.append("HOLD")
                     sizes.append(0.7)
 
